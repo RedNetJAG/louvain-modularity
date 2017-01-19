@@ -10,7 +10,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.SparkContext._
 import org.apache.spark.graphx._
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.{Logging, SparkContext}
+import org.apache.spark.SparkContext
 
 class Louvain() extends Serializable{
   def getEdgeRDD(sc: SparkContext, conf: LouvainConfig, typeConversionMethod: String => Long = _.toLong): RDD[Edge[Long]] = {
