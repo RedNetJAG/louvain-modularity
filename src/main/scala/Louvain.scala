@@ -1,16 +1,11 @@
-import scala.reflect.ClassTag
-
-import com.esotericsoftware.kryo.io.{Input, Output}
-import com.esotericsoftware.kryo.serializers.DefaultArraySerializers.ObjectArraySerializer
-import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
-
-import org.apache.spark._
+import org.apache.spark.SparkContext
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.graphx._
 import org.apache.spark.rdd.RDD
-import org.apache.spark.SparkContext._
-import org.apache.spark.graphx._
-import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.SparkContext
+
+import scala.reflect.ClassTag
+import scala.reflect.io.Path
+import scala.util.Try
 
 class Louvain() extends Serializable{
   def getEdgeRDD(sc: SparkContext, conf: LouvainConfig, typeConversionMethod: String => Long = _.toLong): RDD[Edge[Long]] = {
@@ -53,9 +48,9 @@ class Louvain() extends Serializable{
     * Creates the messages passed between each vertex to convey
     neighborhood community data.
     */
-  def sendCommunityData(e: EdgeContext[LouvainData, Long, Map[(Long, Long), Long]]) = {
-    val m1 = (Map((e.srcAttr.community, e.srcAttr.communitySigmaTot) -> e.attr))
-    val m2 = (Map((e.dstAttr.community, e.dstAttr.communitySigmaTot) -> e.attr))
+  def sendCommunityData(e: EdgeContext[LouvainData, Long, Map[(Long, Long), Long]]): Unit = {
+    val m1 = Map((e.srcAttr.community, e.srcAttr.communitySigmaTot) -> e.attr)
+    val m2 = Map((e.dstAttr.community, e.dstAttr.communitySigmaTot) -> e.attr)
     e.sendToSrc(m2)
     e.sendToDst(m1)
   }
@@ -63,7 +58,7 @@ class Louvain() extends Serializable{
   /**
     * Merge neighborhood community data into a single message for each vertex
     */
-  def mergeCommunityMessages(m1: Map[(Long, Long), Long], m2: Map[(Long, Long), Long]) = {
+  def mergeCommunityMessages(m1: Map[(Long, Long), Long], m2: Map[(Long, Long), Long]): Map[(VertexId, VertexId), VertexId] = {
     val newMap = scala.collection.mutable.HashMap[(Long, Long), Long]()
 
     m1.foreach({ case (k, v) =>
@@ -103,7 +98,6 @@ class Louvain() extends Serializable{
 
     if (!(isCurrentCommunity && sigma_tot.equals(BigDecimal.valueOf(0.0)))) {
       deltaQ = k_i_in - (k_i * sigma_tot / M)
-      //println(s"      $deltaQ = $k_i_in - ( $k_i * $sigma_tot / $M")
     }
 
     deltaQ
@@ -119,19 +113,15 @@ class Louvain() extends Serializable{
     louvainGraph: Graph[LouvainData, Long],
     msgRDD: VertexRDD[Map[(Long, Long), Long]],
     totalEdgeWeight: Broadcast[Long],
-    even: Boolean) = {
+    even: Boolean): VertexRDD[LouvainData] = {
 
-    // innerJoin[U, VD2](other: RDD[(VertexId, U)])(f: (VertexId, VD, U) => VD2): VertexRDD[VD2]
     louvainGraph.vertices.innerJoin(msgRDD)((vid, louvainData, communityMessages) => {
 
       var bestCommunity = louvainData.community
       val startingCommunityId = bestCommunity
-      var maxDeltaQ = BigDecimal(0.0);
+      var maxDeltaQ = BigDecimal(0.0)
       var bestSigmaTot = 0L
 
-      // VertexRDD[scala.collection.immutable.Map[(Long, Long),Long]]
-      // e.g. (1,Map((3,10) -> 2, (6,4) -> 2, (2,8) -> 2, (4,8) -> 2, (5,8) -> 2))
-      // e.g. communityId:3, sigmaTotal:10, communityEdgeWeight:2
       communityMessages.foreach({ case ((communityId, sigmaTotal), communityEdgeWeight) =>
         val deltaQ = q(
           startingCommunityId,
@@ -142,8 +132,6 @@ class Louvain() extends Serializable{
           louvainData.internalWeight,
           totalEdgeWeight.value)
 
-        //println(" communtiy: "+communityId+" sigma:"+sigmaTotal+"
-        //edgeweight:"+communityEdgeWeight+" q:"+deltaQ)
         if (deltaQ > maxDeltaQ || (deltaQ > 0 && (deltaQ == maxDeltaQ &&
           communityId > bestCommunity))) {
           maxDeltaQ = deltaQ
@@ -157,7 +145,6 @@ class Louvain() extends Serializable{
       if (louvainData.community != bestCommunity && ((even &&
         louvainData.community > bestCommunity) || (!even &&
           louvainData.community < bestCommunity))) {
-        //println("  "+vid+" SWITCHED from "+vdata.community+" to "+bestCommunity)
         louvainData.community = bestCommunity
         louvainData.communitySigmaTot = bestSigmaTot
         louvainData.changed = true
@@ -295,7 +282,6 @@ class Louvain() extends Serializable{
         val M = totalGraphWeight.value
         val k_i = louvainData.nodeWeight + louvainData.internalWeight
         val q = (accumulatedInternalWeight.toDouble / M) - ((sigmaTot * k_i) / math.pow(M, 2))
-        //println(s"vid: $vid community: $community $q = ($k_i_in / $M) - ( ($sigmaTot * $k_i) / math.pow($M, 2) )")
         if (q < 0)
           0
         else
@@ -380,7 +366,12 @@ class Louvain() extends Serializable{
     config: LouvainConfig,
     level: Int,
     qValues: Array[(Int, Double)],
-    graph: Graph[LouvainData, Long]) = {
+    graph: Graph[LouvainData, Long]): Unit = {
+
+    if (new java.io.File(config.outputDir).exists) {
+
+      val path: Path = Path(config.outputDir)
+      Try(path.deleteRecursively())}
 
     val vertexSavePath = config.outputDir + "/level_" + level + "_vertices"
     val edgeSavePath = config.outputDir + "/level_" + level + "_edges"
@@ -392,6 +383,7 @@ class Louvain() extends Serializable{
     // overwrite the q values at each level
     sc.parallelize(qValues, 1).saveAsTextFile(config.outputDir + "/qvalues_" + level)
   }
+
 
   //def run[VD: ClassTag](sc: SparkContext, config: LouvainConfig, graph: Graph[VD, Long]): Unit = {
   def run[VD: ClassTag](sc: SparkContext, config: LouvainConfig): Unit = {
@@ -434,8 +426,6 @@ class Louvain() extends Serializable{
       }
 
     } while (!halt)
-      //finalSave(sc, compressionLevel, q_modularityValue, louvainGraph)
-
 
   }
 }
